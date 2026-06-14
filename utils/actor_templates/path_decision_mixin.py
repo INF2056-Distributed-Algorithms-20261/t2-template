@@ -97,7 +97,7 @@ class PathDecisionMixin:
         px, py = -uy, ux
 
         # Symmetric spacing so every pair of adjacent UAVs is COMM_RANGE / num_uavs apart
-        spacing = COMM_RANGE / self._num_uavs
+        spacing = (COMM_RANGE // 2) / self._num_uavs
         centre  = (self._cluster_index - (self._num_uavs - 1) / 2) * spacing
 
         return px * centre, py * centre
