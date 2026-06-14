@@ -138,3 +138,139 @@ def compute_cluster_waypoints(
 
     cache_save("cluster_waypoints", params, [list(v) for v in waypoints])
     return waypoints
+
+
+# ── Polyline interpolation helper ──────────────────────────────────────────
+
+def _interpolate_polyline(
+    corners: list[tuple[float, float]],
+    spacing: float,
+) -> list[tuple[float, float, float]]:
+    """
+    Walk along a 2-D polyline defined by *corners* and place waypoints
+    every *spacing* units.  Returns 3-D tuples with ``z = 0``.
+
+    The first corner is always included.  Fractional distances are carried
+    across segment boundaries so waypoints remain evenly spaced even when
+    a segment is shorter than *spacing*.
+    """
+    if len(corners) < 2:
+        return [(corners[0][0], corners[0][1], 0.0)] if corners else []
+
+    waypoints: list[tuple[float, float, float]] = [
+        (corners[0][0], corners[0][1], 0.0)
+    ]
+    carry = 0.0  # distance traveled since the last placed waypoint
+
+    for i in range(len(corners) - 1):
+        sx, sy = corners[i]
+        ex, ey = corners[i + 1]
+        dx, dy = ex - sx, ey - sy
+        seg_len = hypot(dx, dy)
+        if seg_len < 1e-9:
+            continue
+
+        ux, uy = dx / seg_len, dy / seg_len
+
+        d = spacing - carry  # distance to first candidate in this segment
+        placed_any = False
+        while d <= seg_len:
+            waypoints.append((sx + ux * d, sy + uy * d, 0.0))
+            d += spacing
+            placed_any = True
+
+        if placed_any:
+            carry = seg_len - (d - spacing)
+        else:
+            carry += seg_len
+
+    # Guarantee the final corner is included
+    last = corners[-1]
+    if waypoints[-1][:2] != (last[0], last[1]):
+        waypoints.append((last[0], last[1], 0.0))
+
+    return waypoints
+
+
+# ── Split waypoints (left / right around obstacle) ────────────────────────
+
+def compute_split_waypoints(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    obstacle: ForbiddenZone,
+    comm_range: float,
+    margin: float = 10.0,
+    force_regen: bool = False,
+) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:
+    """
+    Compute two waypoint paths that diverge around an obstacle and converge
+    afterward, creating a split-and-merge pattern suitable for testing
+    leader-election algorithms.
+
+    Both paths share the same *start* and *end* but take opposite sides of
+    the obstacle.  Waypoints are spaced by *comm_range* along each path.
+
+    Args:
+        start:      (x, y) origin (e.g. base position).
+        end:        (x, y) destination (e.g. endpoint position).
+        obstacle:   The ForbiddenZone to route around.
+        comm_range: Spacing between consecutive waypoints.
+        margin:     Clearance between the obstacle boundary and the
+                    bypass path centre-line.
+
+    Returns:
+        ``(left_waypoints, right_waypoints)`` — each a list of
+        ``(x, y, 0.0)`` tuples.
+    """
+    params = {
+        "fn":         "compute_split_waypoints",
+        "start":      start,
+        "end":        end,
+        "obstacle":   vars(obstacle),
+        "comm_range": comm_range,
+        "margin":     margin,
+    }
+
+    if not force_regen:
+        cached = cache_load("split_waypoints", params)
+        if cached is not None:
+            return (
+                [tuple(v) for v in cached["left"]],
+                [tuple(v) for v in cached["right"]],
+            )
+
+    # Key Y-coordinates (approach / departure)
+    pre_y  = obstacle.y_min - margin
+    post_y = obstacle.y_max + margin
+
+    # Key X-coordinates (bypass offsets)
+    left_x  = obstacle.x_min - margin
+    right_x = obstacle.x_max + margin
+
+    left_corners = [
+        start,
+        (start[0], pre_y),      # approach
+        (left_x,   pre_y),      # turn left
+        (left_x,   post_y),     # along left side
+        (end[0],   post_y),     # rejoin centre
+        end,
+    ]
+
+    right_corners = [
+        start,
+        (start[0], pre_y),      # approach
+        (right_x,  pre_y),      # turn right
+        (right_x,  post_y),     # along right side
+        (end[0],   post_y),     # rejoin centre
+        end,
+    ]
+
+    left_wps  = _interpolate_polyline(left_corners,  comm_range)
+    right_wps = _interpolate_polyline(right_corners, comm_range)
+
+    cache_save("split_waypoints", params, {
+        "left":  [list(v) for v in left_wps],
+        "right": [list(v) for v in right_wps],
+    })
+
+    return left_wps, right_wps

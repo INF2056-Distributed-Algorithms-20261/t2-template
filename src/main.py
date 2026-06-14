@@ -30,6 +30,8 @@ from utils.common.config import (
     SENSOR_POSITIONS,
     NUM_UAVS,
     CLUSTER_WAYPOINTS,
+    LEFT_WAYPOINTS,
+    RIGHT_WAYPOINTS,
 )
 
 from src.sensor import Sensor
@@ -78,11 +80,30 @@ def main() -> None:
     for sensor_pos in SENSOR_POSITIONS.values():
         builder.add_node(Sensor, sensor_pos)
 
-    # ── UAV cluster ────────────────────────────────────────────────────────
-    # Each UAV gets a cluster_index so PathDecisionMixin can compute its
-    # lateral formation offset.  All UAVs start at BASE_GROUND.
-    for i in range(NUM_UAVS):
-        UAVClass = make_uav_viz(cluster_index=i)
+    # ── UAV cluster (split around obstacle) ────────────────────────────────
+    # Half the UAVs take the left path around the obstacle and the other
+    # half take the right path.  Both groups merge after the obstacle,
+    # creating a natural scenario for leader-election testing.
+    n_left  = NUM_UAVS // 2
+    n_right = NUM_UAVS - n_left
+
+    logging.info(f"Left group:  {n_left} UAVs  ({len(LEFT_WAYPOINTS)} waypoints)")
+    logging.info(f"Right group: {n_right} UAVs ({len(RIGHT_WAYPOINTS)} waypoints)")
+
+    for i in range(n_left):
+        UAVClass = make_uav_viz(
+            cluster_index=i,
+            waypoints=LEFT_WAYPOINTS,
+            group_size=n_left,
+        )
+        builder.add_node(UAVClass, BASE_GROUND)
+
+    for i in range(n_right):
+        UAVClass = make_uav_viz(
+            cluster_index=i,
+            waypoints=RIGHT_WAYPOINTS,
+            group_size=n_right,
+        )
         builder.add_node(UAVClass, BASE_GROUND)
 
     # ── Handlers ───────────────────────────────────────────────────────────

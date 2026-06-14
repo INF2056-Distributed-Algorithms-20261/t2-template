@@ -1,7 +1,8 @@
 from utils.common.sensor_positions import (
     ForbiddenZone,
     generate_sensor_positions,
-    compute_cluster_waypoints
+    compute_cluster_waypoints,
+    compute_split_waypoints,
 )
 
 # ---------------------------------------------------------------------------
@@ -85,4 +86,18 @@ CLUSTER_WAYPOINTS = compute_cluster_waypoints(
     start      = (BASE_GROUND[0], BASE_GROUND[1]),
     end        = (ENDPOINT_GROUND[0], ENDPOINT_GROUND[1]),
     comm_range = COMM_RANGE,
+)
+
+# ── Split paths around the obstacle ────────────────────────────────────────
+# Two waypoint sequences that diverge around the forbidden zone and converge
+# afterward.  Used to split the cluster into two sub-groups for testing
+# leader-election algorithms during the merge phase.
+OBSTACLE_MARGIN = 10.0
+
+LEFT_WAYPOINTS, RIGHT_WAYPOINTS = compute_split_waypoints(
+    start      = (BASE_GROUND[0], BASE_GROUND[1]),
+    end        = (ENDPOINT_GROUND[0], ENDPOINT_GROUND[1]),
+    obstacle   = OBSTACLE_ZONE,
+    comm_range = COMM_RANGE,
+    margin     = OBSTACLE_MARGIN,
 )

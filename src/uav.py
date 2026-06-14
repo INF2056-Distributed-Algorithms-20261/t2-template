@@ -1,11 +1,24 @@
+from typing import List, Tuple
+
 from utils.actor_templates.uav_template import make_uav_protocol
 from utils.viz_templates.uav_viz_template import UAVVizMixin
 from utils.common.config import CLUSTER_WAYPOINTS, NUM_UAVS
 
 
-def make_uav(cluster_index: int) -> type:
+def make_uav(
+    cluster_index: int,
+    waypoints: List[Tuple[float, float, float]] = None,
+    group_size: int = None,
+) -> type:
     """
     Factory that returns a UAV protocol class for the given cluster slot.
+
+    Args:
+        cluster_index: This UAV's slot within its sub-group (0-based).
+        waypoints:     Ordered waypoint path for this UAV's group.
+                       Defaults to CLUSTER_WAYPOINTS.
+        group_size:    Number of UAVs sharing this path (used for
+                       formation spacing).  Defaults to NUM_UAVS.
 
     If you want to add behaviours to every UAV (e.g. battery drain, swap
     logic), do it here: add a mixin before make_uav_protocol, or subclass
@@ -26,22 +39,43 @@ def make_uav(cluster_index: int) -> type:
             pass
         return _UAV
     """
+    if waypoints is None:
+        waypoints = CLUSTER_WAYPOINTS
+    if group_size is None:
+        group_size = NUM_UAVS
+
     return make_uav_protocol(
-        waypoints     = CLUSTER_WAYPOINTS,
+        waypoints     = waypoints,
         cluster_index = cluster_index,
-        num_uavs      = NUM_UAVS,
+        num_uavs      = group_size,
     )
 
 
-def make_uav_viz(cluster_index: int) -> type:
+def make_uav_viz(
+    cluster_index: int,
+    waypoints: List[Tuple[float, float, float]] = None,
+    group_size: int = None,
+) -> type:
     """
     Same as make_uav() but with GrADySim visualisation support mixed in.
     Use this class with VisualizationHandler enabled.
+
+    Args:
+        cluster_index: This UAV's slot within its sub-group (0-based).
+        waypoints:     Ordered waypoint path for this UAV's group.
+                       Defaults to CLUSTER_WAYPOINTS.
+        group_size:    Number of UAVs sharing this path (used for
+                       formation spacing).  Defaults to NUM_UAVS.
     """
+    if waypoints is None:
+        waypoints = CLUSTER_WAYPOINTS
+    if group_size is None:
+        group_size = NUM_UAVS
+
     class _UAVViz(UAVVizMixin, make_uav_protocol(
-        waypoints     = CLUSTER_WAYPOINTS,
+        waypoints     = waypoints,
         cluster_index = cluster_index,
-        num_uavs      = NUM_UAVS,
+        num_uavs      = group_size,
     )):
         """
         Example UAV Protocol with added Visualization support.
