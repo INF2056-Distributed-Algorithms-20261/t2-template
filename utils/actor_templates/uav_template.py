@@ -228,9 +228,7 @@ def make_uav_protocol(
                                 f"UAV {self.provider.get_id()} merged from UAV {raw.get('sender_id')} "
                                 f"[L={self._lamport.time}] | buffer: {self.packets}"
                             )
-                    # Otherwise, it's an old message. Resend our heartbeat.
-                    else:
-                        self._send_heartbeat()
+                    # Otherwise, it's an old/stale message — just ignore it.
 
         # ── Telemetry ──────────────────────────────────────────────────
 
