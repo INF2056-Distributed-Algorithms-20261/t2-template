@@ -9,7 +9,7 @@ from utils.common.sensor_positions import (
 # Constants
 # ---------------------------------------------------------------------------
 # Overall simulation configs
-SIMULATION_DURATION   = 1000
+SIMULATION_DURATION   = 120
 
 # UAV configs
 NUM_UAVS = 5

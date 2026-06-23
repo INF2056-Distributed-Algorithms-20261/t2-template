@@ -35,7 +35,9 @@ from utils.common.config import (
 )
 
 from src.sensor import Sensor
-from src.uav import make_uav_viz
+from src.uav import make_uav_viz, set_total_uavs
+
+from utils.metrics.election_stats import ELECTION_LOG
 
 
 def main() -> None:
@@ -51,6 +53,12 @@ def main() -> None:
         action="store_true",
         default=False,
         help="Force regeneration of sensor positions and cluster waypoints",
+    )
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        default=False,
+        help="UAVs loop (bounce) along their path instead of stopping at the endpoint",
     )
     args = parser.parse_args()
 
@@ -95,6 +103,7 @@ def main() -> None:
             cluster_index=i,
             waypoints=LEFT_WAYPOINTS,
             group_size=n_left,
+            loop=args.loop,
         )
         builder.add_node(UAVClass, BASE_GROUND)
 
@@ -103,6 +112,7 @@ def main() -> None:
             cluster_index=i,
             waypoints=RIGHT_WAYPOINTS,
             group_size=n_right,
+            loop=args.loop,
         )
         builder.add_node(UAVClass, BASE_GROUND)
 
@@ -116,10 +126,71 @@ def main() -> None:
         builder.add_handler(VisualizationHandler(viz_config))
 
     # ── Run ────────────────────────────────────────────────────────────────
+    if not args.loop:
+        set_total_uavs(NUM_UAVS)
+
     simulation = builder.build()
     simulation.start_simulation()
 
+    # ── Election statistics summary ────────────────────────────────────────
+    _print_election_summary()
+
     logging.info("Simulation complete.")
+
+
+def _print_election_summary() -> None:
+    """Print a formatted summary of all election events recorded during
+    the simulation."""
+    if not ELECTION_LOG:
+        print("\n" + "=" * 60)
+        print("  ELECTION SUMMARY: No elections were triggered.")
+        print("=" * 60 + "\n")
+        return
+
+    print("\n" + "=" * 60)
+    print("  ELECTION SUMMARY")
+    print("=" * 60)
+    print(f"  Total elections: {len(ELECTION_LOG)}")
+
+    durations = [e.duration for e in ELECTION_LOG if e.duration > 0]
+    if durations:
+        print(f"  Average election duration: {sum(durations)/len(durations):.2f}s")
+        print(f"  Max election duration:     {max(durations):.2f}s")
+        print(f"  Min election duration:     {min(durations):.2f}s")
+
+    merge_events = [e for e in ELECTION_LOG if e.trigger == "merge"]
+    split_events = [e for e in ELECTION_LOG if e.trigger == "split"]
+    print(f"  Merge-triggered elections: {len(merge_events)}")
+    print(f"  Split-triggered elections: {len(split_events)}")
+    print("-" * 60)
+
+    for evt in ELECTION_LOG:
+        print(
+            f"  Election #{evt.election_id} | trigger={evt.trigger} | "
+            f"winner=UAV {evt.winner_id} | "
+            f"duration={evt.duration:.2f}s "
+            f"({evt.start_time:.1f}s → {evt.end_time:.1f}s)"
+        )
+        if evt.buffer_sizes:
+            print(f"    Buffer sizes at transfer:")
+            for uav_id, size in sorted(evt.buffer_sizes.items()):
+                print(f"      UAV {uav_id}: {size} packets buffered")
+        print()
+
+    # ── Per-merge time cost (the main metric) ──────────────────────────
+    if merge_events:
+        merge_durations = [e.duration for e in merge_events]
+        total_merge_time = sum(merge_durations)
+        print("-" * 60)
+        print(f"  TIME LOST TO MERGES: {total_merge_time:.2f}s total")
+        print(f"  Average merge election: {total_merge_time/len(merge_durations):.2f}s")
+
+        total_buffered = sum(
+            sum(e.buffer_sizes.values()) for e in merge_events
+        )
+        print(f"  Total packets buffered during merges: {total_buffered}")
+
+    print("=" * 60 + "\n")
 
 
 if __name__ == "__main__":
