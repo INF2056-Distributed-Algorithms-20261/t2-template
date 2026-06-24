@@ -41,15 +41,68 @@ The visualisation connects to the GrADySim web viewer at
 
 ## Leader Election
 
-The simulation includes a **Bully-style leader election protocol** ([`src/election_mixin.py`](src/election_mixin.py)).
+The simulation includes a **Bully-style leader election protocol** ([`src/election_mixin.py`](src/election_mixin.py)) with a **pluggable strategy architecture** that lets you customise election behaviour without modifying the core lifecycle.
 
 ### How it works
 
-1. **Pre-split**: Before UAV groups diverge around the obstacle, the leader is **predefined** as the UAV with the highest node ID — no election overhead.
-2. **Split detection**: A periodic check (every 1 s) monitors heartbeat timestamps. If a known peer hasn't been heard from in 5 s (`PEER_TIMEOUT`), it's considered out of range. If the lost peer was the leader, a new election is triggered.
-3. **Merge detection**: When a heartbeat arrives from a previously-unknown peer, a merge event is detected and a new election is triggered.
-4. **During election**: Sensor data is still collected but buffered separately (`_election_buffer`). Normal data gossip continues for already-collected packets.
-5. **After election**: The winner is announced. Non-leaders **transfer all their data** (packets + election buffer) to the leader, then clear their local buffers.
+1. **Pre-split**: Before UAV groups diverge around the obstacle, the leader is **predefined** using the reconciliation strategy's `choose_leader()` — by default the UAV with the highest node ID.  No election overhead.
+2. **Split detection**: A periodic check (every 1 s) calls the **anomaly detection strategy**.  By default, if a known peer hasn't been heard from in 5 s (`PEER_TIMEOUT`), it's considered out of range.
+3. **Merge detection**: When a heartbeat arrives from a previously-unknown peer, a merge event is detected.
+4. **Election invitation**: The **invitation strategy** decides whether *this* node should start a new election and builds the broadcast message.
+5. **During election**: Sensor data is still collected but buffered separately (`_election_buffer`).
+6. **After election**: The **reconciliation strategy** determines who becomes leader and how state is collected. Non-leaders transfer data to the leader.
+
+### Customising Election Policies
+
+The election mixin delegates three policy decisions to **pluggable strategy objects**.  Each is defined as an abstract base class in [`src/strategies.py`](src/strategies.py) with default implementations in [`src/strategies_default.py`](src/strategies_default.py).
+
+| Strategy | ABC | Default | What it controls |
+|----------|-----|---------|-----------------|
+| **Anomaly Detection** | `AnomalyDetectionStrategy` | `HeartbeatTimeoutDetection` | *How* splits/merges are detected (heartbeat timeout, member-member interaction, etc.) |
+| **Invitation** | `InvitationStrategy` | `AnyMemberLeadInvitation` | *Who* starts the election and *how* peers are invited (lead-lead, any-member, member-based) |
+| **Reconciliation** | `ReconciliationStrategy` | `BullyReconciliation` | *Who* becomes leader (highest ID, lowest ID, custom criteria) and *how* state is collected (`FROM_ALL_MEMBERS` or `FROM_SUB_LEADERS`) |
+
+> **Note:** The station collection strategy `FROM_SUB_LEADERS` is not implemented yet in `election_mixin.py` (around line 464). Will need to implement a sub-swarm detection mechanism.
+
+#### Creating a custom strategy
+
+1. Subclass the relevant ABC from `src.strategies`
+2. Implement the required abstract methods
+3. Pass your strategy to `make_uav()` or `make_uav_viz()`
+
+```python
+# my_strategies.py
+from src.strategies import ReconciliationStrategy, CollectionMode, ElectionContext
+from typing import Set
+
+class LowestIdReconciliation(ReconciliationStrategy):
+    """Elect the node with the lowest ID instead of the highest."""
+
+    def choose_leader(self, ctx: ElectionContext, candidates: Set[int]) -> int:
+        return min(candidates)
+
+    def get_collection_mode(self) -> CollectionMode:
+        # Only collect state from former sub-swarm leaders
+        return CollectionMode.FROM_SUB_LEADERS
+```
+
+```python
+# In main.py — plug it in
+from my_strategies import LowestIdReconciliation
+
+UAVClass = make_uav_viz(
+    cluster_index=0,
+    waypoints=LEFT_WAYPOINTS,
+    group_size=n_left,
+    reconciliation_strategy=LowestIdReconciliation(),
+)
+```
+
+You can override one, two, or all three strategies independently.  Any strategy not explicitly provided falls back to its default.
+
+#### Strategy context
+
+Every strategy method receives an `ElectionContext` — a read-only snapshot of the current election state (node ID, peers, leader, buffers, etc.).  Strategies return result objects rather than mutating state directly, keeping them testable and decoupled from the mixin internals.
 
 ### Election messages
 

@@ -1,5 +1,5 @@
 import logging
-from typing import List, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
 from gradysim.protocol.messages.telemetry import Telemetry
 
@@ -8,6 +8,11 @@ from utils.viz_templates.uav_viz_template import UAVVizMixin
 from utils.common.config import CLUSTER_WAYPOINTS, NUM_UAVS
 
 from src.election_mixin import ElectionMixin
+from src.strategies import (
+    AnomalyDetectionStrategy,
+    InvitationStrategy,
+    ReconciliationStrategy,
+)
 
 
 # ── Shared state for coordinated shutdown (non-loop mode) ──────────────────
@@ -34,6 +39,9 @@ def make_uav(
     waypoints: List[Tuple[float, float, float]] = None,
     group_size: int = None,
     loop: bool = False,
+    anomaly_strategy: Optional[AnomalyDetectionStrategy] = None,
+    invitation_strategy: Optional[InvitationStrategy] = None,
+    reconciliation_strategy: Optional[ReconciliationStrategy] = None,
 ) -> type:
     """
     Factory that returns a UAV protocol class for the given cluster slot.
@@ -47,6 +55,12 @@ def make_uav(
         loop:          If True the UAV bounces back and forth along the
                        path.  If False (default) the UAV stops once it
                        reaches the last waypoint.
+        anomaly_strategy:       Custom anomaly-detection strategy.
+                                Defaults to HeartbeatTimeoutDetection.
+        invitation_strategy:    Custom invitation strategy.
+                                Defaults to AnyMemberLeadInvitation.
+        reconciliation_strategy: Custom reconciliation strategy.
+                                Defaults to BullyReconciliation.
 
     If you want to add behaviours to every UAV (e.g. battery drain, swap
     logic), do it here: add a mixin before make_uav_protocol, or subclass
@@ -109,6 +123,14 @@ def make_uav(
                 return
             super().handle_telemetry(telemetry)
 
+    # Apply custom strategies as class-level overrides
+    if anomaly_strategy is not None:
+        _UAV.anomaly_strategy = anomaly_strategy
+    if invitation_strategy is not None:
+        _UAV.invitation_strategy = invitation_strategy
+    if reconciliation_strategy is not None:
+        _UAV.reconciliation_strategy = reconciliation_strategy
+
     _UAV.__name__ = f"UAV_slot{cluster_index}"
     return _UAV
 
@@ -118,6 +140,9 @@ def make_uav_viz(
     waypoints: List[Tuple[float, float, float]] = None,
     group_size: int = None,
     loop: bool = False,
+    anomaly_strategy: Optional[AnomalyDetectionStrategy] = None,
+    invitation_strategy: Optional[InvitationStrategy] = None,
+    reconciliation_strategy: Optional[ReconciliationStrategy] = None,
 ) -> type:
     """
     Same as make_uav() but with GrADySim visualisation support mixed in.
@@ -132,6 +157,12 @@ def make_uav_viz(
         loop:          If True the UAV bounces back and forth along the
                        path.  If False (default) the UAV stops once it
                        reaches the last waypoint.
+        anomaly_strategy:       Custom anomaly-detection strategy.
+                                Defaults to HeartbeatTimeoutDetection.
+        invitation_strategy:    Custom invitation strategy.
+                                Defaults to AnyMemberLeadInvitation.
+        reconciliation_strategy: Custom reconciliation strategy.
+                                Defaults to BullyReconciliation.
     """
     if waypoints is None:
         waypoints = CLUSTER_WAYPOINTS
@@ -178,6 +209,14 @@ def make_uav_viz(
             if self._reached_end:
                 return
             super().handle_telemetry(telemetry)
+
+    # Apply custom strategies as class-level overrides
+    if anomaly_strategy is not None:
+        _UAVViz.anomaly_strategy = anomaly_strategy
+    if invitation_strategy is not None:
+        _UAVViz.invitation_strategy = invitation_strategy
+    if reconciliation_strategy is not None:
+        _UAVViz.reconciliation_strategy = reconciliation_strategy
 
     _UAVViz.__name__ = f"UAV_slot{cluster_index}"
     return _UAVViz

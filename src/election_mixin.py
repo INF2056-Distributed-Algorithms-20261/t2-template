@@ -7,8 +7,17 @@ UAV protocol in the MRO::
     class MyUAV(UAVVizMixin, ElectionMixin, make_uav_protocol(...)):
         pass
 
-Behaviour
----------
+Policy customisation
+--------------------
+Three class-level attributes control the election behaviour.  Override
+them with your own :class:`~src.strategies.AnomalyDetectionStrategy`,
+:class:`~src.strategies.InvitationStrategy`, or
+:class:`~src.strategies.ReconciliationStrategy` to swap algorithms
+without touching the core lifecycle (see ``strategies_default.py`` for
+the built-in implementations and the README for usage examples).
+
+Behaviour (defaults)
+--------------------
 - **Pre-split**: the initial leader is predefined (highest node ID in the
   group).  No election is run until the first split or merge event.
 - **Split detection**: when heartbeats from a known peer stop arriving for
@@ -39,6 +48,19 @@ from gradysim.protocol.messages.communication import BroadcastMessageCommand
 
 from utils.metrics.election_stats import ELECTION_LOG, ElectionEvent
 
+from src.strategies import (
+    AnomalyDetectionStrategy,
+    CollectionMode,
+    ElectionContext,
+    InvitationStrategy,
+    ReconciliationStrategy,
+)
+from src.strategies_default import (
+    AnyMemberLeadInvitation,
+    BullyReconciliation,
+    HeartbeatTimeoutDetection,
+)
+
 # ── Tuning constants (not in config.py — this is example code) ────────────
 
 ELECTION_WAIT = 3.0       # seconds to wait for "alive" before declaring victory
@@ -57,10 +79,37 @@ class ElectionMixin:
         _cluster_index      — int
         _num_uavs           — int
 
+    **Strategy attributes** (class-level, override to customise):
+
+    .. attribute:: anomaly_strategy
+       :type: AnomalyDetectionStrategy
+
+       Controls *how* splits and merges are detected.
+       Default: :class:`HeartbeatTimeoutDetection`.
+
+    .. attribute:: invitation_strategy
+       :type: InvitationStrategy
+
+       Controls *who* starts an election and *how* peers are invited.
+       Default: :class:`AnyMemberLeadInvitation`.
+
+    .. attribute:: reconciliation_strategy
+       :type: ReconciliationStrategy
+
+       Controls *who* becomes leader and *how* state is consolidated.
+       Default: :class:`BullyReconciliation`.
+
     The mixin adds its own timers (``election_check``, ``election_timeout``)
     and message types (``election``, ``alive``, ``leader``, ``data_transfer``)
     that coexist with the base protocol's heartbeat messages.
     """
+
+    # ── Class-level strategy defaults ──────────────────────────────────
+    # Override these in a subclass or in the factory to change behaviour.
+
+    anomaly_strategy: AnomalyDetectionStrategy = HeartbeatTimeoutDetection()
+    invitation_strategy: InvitationStrategy = AnyMemberLeadInvitation()
+    reconciliation_strategy: ReconciliationStrategy = BullyReconciliation()
 
     # ── Initialization ─────────────────────────────────────────────────
 
@@ -91,6 +140,29 @@ class ElectionMixin:
 
         # Schedule the periodic split / merge detector
         self._schedule_election_check()
+
+    # ── Context builder ────────────────────────────────────────────────
+
+    def _build_election_context(self) -> ElectionContext:
+        """Create a read-only snapshot of election state for strategies."""
+        return ElectionContext(
+            my_id=self.provider.get_id(),
+            is_leader=self._is_leader,
+            current_leader_id=self._current_leader_id,
+            known_peers=set(self._known_peers),       # defensive copy
+            peer_last_seen=dict(self._peer_last_seen), # defensive copy
+            current_time=self.provider.current_time(),
+            election_in_progress=self._election_in_progress,
+            packets=dict(self.packets),
+            election_buffer=dict(self._election_buffer),
+            broadcast=self._broadcast_dict,
+        )
+
+    def _broadcast_dict(self, msg: dict) -> None:
+        """Convenience: JSON-encode *msg* and broadcast it."""
+        self.provider.send_communication_command(
+            BroadcastMessageCommand(json.dumps(msg))
+        )
 
     # ── Timer scheduling ───────────────────────────────────────────────
 
@@ -186,7 +258,9 @@ class ElectionMixin:
     def _try_predefine_leader(self) -> None:
         """Set the initial leader to the highest known ID (including self)."""
         all_ids = self._known_peers | {self.provider.get_id()}
-        leader = max(all_ids)
+        leader = self.reconciliation_strategy.choose_leader(
+            self._build_election_context(), all_ids,
+        )
         self._current_leader_id = leader
         self._is_leader = (leader == self.provider.get_id())
         self._leader_predefined = True
@@ -195,36 +269,36 @@ class ElectionMixin:
             f"{' (self)' if self._is_leader else ''}"
         )
 
-    # ── Split / merge detection ────────────────────────────────────────
+    # ── Split / merge detection (delegates to anomaly strategy) ────────
 
     def _check_for_split_or_merge(self) -> None:
         """
-        Periodic check: remove peers whose heartbeat timed out.
-        If the lost peer was the leader, trigger a new election.
+        Periodic check: ask the anomaly-detection strategy whether any
+        peers have been lost or discovered, then act on the result.
         """
-        now = self.provider.current_time()
-        lost_peers = set()
-        for peer_id, last_seen in list(self._peer_last_seen.items()):
-            if now - last_seen > PEER_TIMEOUT:
-                lost_peers.add(peer_id)
+        ctx = self._build_election_context()
+        result = self.anomaly_strategy.check_for_anomaly(ctx)
 
-        if not lost_peers:
+        if not result.lost_peers:
             return
 
-        for pid in lost_peers:
+        # Remove lost peers from internal bookkeeping
+        for pid in result.lost_peers:
             self._known_peers.discard(pid)
-            del self._peer_last_seen[pid]
+            self._peer_last_seen.pop(pid, None)
             logging.info(
                 f"UAV {self.provider.get_id()} lost contact with peer {pid}"
             )
 
-        # If we lost the leader, elect a new one
-        if self._current_leader_id in lost_peers:
+        # Ask the invitation strategy whether to start an election
+        # (rebuild context after peer removal)
+        ctx = self._build_election_context()
+        if self.invitation_strategy.should_start_election(ctx, result):
             logging.info(
-                f"UAV {self.provider.get_id()} lost leader {self._current_leader_id} "
-                f"— triggering election"
+                f"UAV {self.provider.get_id()} lost leader "
+                f"{result.trigger} — triggering election"
             )
-            self._start_election("split")
+            self._start_election(result.trigger or "split")
 
     # ── Election logic (Bully algorithm) ───────────────────────────────
 
@@ -253,15 +327,10 @@ class ElectionMixin:
             f"(trigger={trigger}, election_id={self._election_id_counter})"
         )
 
-        # Broadcast election message
-        msg = {
-            "msg_type": "election",
-            "sender_type": "uav",
-            "sender_id": self.provider.get_id(),
-        }
-        self.provider.send_communication_command(
-            BroadcastMessageCommand(json.dumps(msg))
-        )
+        # Ask the invitation strategy to build the election message
+        ctx = self._build_election_context()
+        msg = self.invitation_strategy.build_election_message(ctx)
+        self._broadcast_dict(msg)
 
         # Set timeout: if no "alive" received, we win
         self._schedule_election_timeout()
@@ -275,16 +344,21 @@ class ElectionMixin:
             f"UAV {my_id} received election from {sender_id}"
         )
 
-        if my_id > sender_id:
-            # We have higher ID → send alive and start our own election
+        # Use the reconciliation strategy to decide who should prevail
+        ctx = self._build_election_context()
+        preferred = self.reconciliation_strategy.choose_leader(
+            ctx, {my_id, sender_id},
+        )
+
+        if preferred == my_id:
+            # We are preferred over the sender → send alive and start our
+            # own election
             alive_msg = {
                 "msg_type": "alive",
                 "sender_type": "uav",
                 "sender_id": my_id,
             }
-            self.provider.send_communication_command(
-                BroadcastMessageCommand(json.dumps(alive_msg))
-            )
+            self._broadcast_dict(alive_msg)
             # Start our own election if not already running
             if not self._election_in_progress:
                 self._start_election(
@@ -292,11 +366,11 @@ class ElectionMixin:
                     if self._current_election_event
                     else "merge"
                 )
-        # If sender has higher ID, just wait — they'll become leader or
-        # someone even higher will.
+        # If sender is preferred, just wait — they'll become leader or
+        # someone even more preferred will.
 
     def _on_receive_alive(self, raw: dict) -> None:
-        """A higher-ID peer is alive — we won't be leader."""
+        """A higher-priority peer is alive — we won't be leader."""
         sender_id = raw["sender_id"]
         logging.debug(
             f"UAV {self.provider.get_id()} received alive from {sender_id} "
@@ -313,8 +387,8 @@ class ElectionMixin:
             return
 
         if self._received_alive:
-            # A higher-ID node is out there; wait for their "leader" message.
-            # Reset and extend the timeout in case of delays.
+            # A higher-priority node is out there; wait for their "leader"
+            # message.  Reset and extend the timeout in case of delays.
             logging.debug(
                 f"UAV {self.provider.get_id()} received alive — "
                 f"extending election wait"
@@ -334,9 +408,7 @@ class ElectionMixin:
             "sender_id": my_id,
             "election_start_time": self._election_start_time,
         }
-        self.provider.send_communication_command(
-            BroadcastMessageCommand(json.dumps(leader_msg))
-        )
+        self._broadcast_dict(leader_msg)
 
     def _on_receive_leader(self, raw: dict) -> None:
         """Accept the declared leader and transfer buffered data."""
@@ -383,9 +455,18 @@ class ElectionMixin:
             self.packets[sensor] = self.packets.get(sensor, 0) + count
         self._election_buffer.clear()
 
-        # Non-leaders: transfer all data to the leader
+        # Non-leaders: transfer data to the leader based on collection mode
         if not self._is_leader and leader_id is not None:
-            self._transfer_data_to_leader(leader_id)
+            collection = self.reconciliation_strategy.get_collection_mode()
+            if collection == CollectionMode.FROM_ALL_MEMBERS:
+                # Every non-leader sends its data to the leader
+                self._transfer_data_to_leader(leader_id)
+            elif collection == CollectionMode.FROM_SUB_LEADERS:
+                # Only former sub-swarm leaders send data
+                # (For now, in a simple topology every node was its own
+                # "sub-leader" after a split, so this behaves identically.
+                # Custom strategies can refine this with sub-swarm tracking.)
+                self._transfer_data_to_leader(leader_id)
 
     def _transfer_data_to_leader(self, leader_id: int) -> None:
         """Send all collected packets to the leader, then clear local buffer."""
@@ -398,9 +479,7 @@ class ElectionMixin:
             "sender_id": self.provider.get_id(),
             "packets": dict(self.packets),
         }
-        self.provider.send_communication_command(
-            BroadcastMessageCommand(json.dumps(transfer_msg))
-        )
+        self._broadcast_dict(transfer_msg)
         logging.info(
             f"UAV {self.provider.get_id()} transferred {sum(self.packets.values())} "
             f"packets to leader {leader_id} | breakdown: {self.packets}"
