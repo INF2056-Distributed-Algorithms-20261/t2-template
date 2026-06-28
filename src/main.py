@@ -8,6 +8,7 @@ Run with:
 """
 import logging
 import argparse
+from collections import OrderedDict
 
 from gradysim.simulator.handler.communication import (
     CommunicationHandler,
@@ -147,48 +148,100 @@ def _print_election_summary() -> None:
         print("=" * 60 + "\n")
         return
 
+    # Aggregate per logical election round so all participants are
+    # represented under the same split/merge event.
+    rounds = OrderedDict()
+    for e in sorted(ELECTION_LOG, key=lambda x: x.start_time):
+        round_id = e.round_id or (
+            f"legacy-{e.trigger}-{e.election_id}-{e.start_time:.3f}"
+        )
+        if round_id not in rounds:
+            rounds[round_id] = {
+                "trigger": e.trigger,
+                "start_time": e.start_time,
+                "end_time": e.end_time,
+                "winner_id": e.winner_id,
+                "participants": set(e.participants),
+                "buffer_sizes": dict(e.buffer_sizes),
+            }
+            continue
+
+        agg = rounds[round_id]
+        agg["start_time"] = min(agg["start_time"], e.start_time)
+        agg["end_time"] = max(agg["end_time"], e.end_time)
+        if agg["winner_id"] == -1 and e.winner_id != -1:
+            agg["winner_id"] = e.winner_id
+        agg["participants"].update(e.participants)
+        for uav_id, size in e.buffer_sizes.items():
+            agg["buffer_sizes"][uav_id] = max(
+                agg["buffer_sizes"].get(uav_id, 0),
+                size,
+            )
+
+    round_list = []
+    for rid, agg in rounds.items():
+        start = agg["start_time"]
+        end = agg["end_time"]
+        round_list.append(
+            {
+                "round_id": rid,
+                "trigger": agg["trigger"],
+                "start_time": start,
+                "end_time": end,
+                "duration": max(0.0, end - start),
+                "winner_id": agg["winner_id"],
+                "participants": sorted(agg["participants"]),
+                "buffer_sizes": agg["buffer_sizes"],
+            }
+        )
+
     print("\n" + "=" * 60)
     print("  ELECTION SUMMARY")
     print("=" * 60)
-    print(f"  Total elections: {len(ELECTION_LOG)}")
+    print(f"  Total elections: {len(round_list)}")
 
-    durations = [e.duration for e in ELECTION_LOG if e.duration > 0]
+    durations = [e["duration"] for e in round_list if e["duration"] > 0]
     if durations:
         print(f"  Average election duration: {sum(durations)/len(durations):.2f}s")
         print(f"  Max election duration:     {max(durations):.2f}s")
         print(f"  Min election duration:     {min(durations):.2f}s")
 
-    merge_events = [e for e in ELECTION_LOG if e.trigger == "merge"]
-    split_events = [e for e in ELECTION_LOG if e.trigger == "split"]
+    merge_events = [e for e in round_list if e["trigger"] == "merge"]
+    split_events = [e for e in round_list if e["trigger"] == "split"]
     print(f"  Merge-triggered elections: {len(merge_events)}")
     print(f"  Split-triggered elections: {len(split_events)}")
     print("-" * 60)
 
-    for evt in ELECTION_LOG:
+    for idx, evt in enumerate(round_list, start=1):
+        winner = evt["winner_id"] if evt["winner_id"] != -1 else "unknown"
         print(
-            f"  Election #{evt.election_id} | trigger={evt.trigger} | "
-            f"winner=UAV {evt.winner_id} | "
-            f"duration={evt.duration:.2f}s "
-            f"({evt.start_time:.1f}s → {evt.end_time:.1f}s)"
+            f"  Election #{idx} | trigger={evt['trigger']} | "
+            f"winner=UAV {winner} | "
+            f"duration={evt['duration']:.2f}s "
+            f"({evt['start_time']:.1f}s → {evt['end_time']:.1f}s)"
         )
-        if evt.buffer_sizes:
+        if evt["buffer_sizes"]:
             print(f"    Buffer sizes at transfer:")
-            for uav_id, size in sorted(evt.buffer_sizes.items()):
+            for uav_id in evt["participants"]:
+                size = evt["buffer_sizes"].get(uav_id, 0)
                 print(f"      UAV {uav_id}: {size} packets buffered")
         print()
 
     # ── Per-merge time cost (the main metric) ──────────────────────────
     if merge_events:
-        merge_durations = [e.duration for e in merge_events]
+        merge_durations = [e["duration"] for e in merge_events]
         total_merge_time = sum(merge_durations)
         print("-" * 60)
         print(f"  TIME LOST TO MERGES: {total_merge_time:.2f}s total")
         print(f"  Average merge election: {total_merge_time/len(merge_durations):.2f}s")
 
         total_buffered = sum(
-            sum(e.buffer_sizes.values()) for e in merge_events
+            sum(e["buffer_sizes"].values()) for e in merge_events
         )
         print(f"  Total packets buffered during merges: {total_buffered}")
+
+    total_buffered_all = sum(sum(e["buffer_sizes"].values()) for e in round_list)
+    print(f"  Total packets buffered across all elections: {total_buffered_all}")
 
     print("=" * 60 + "\n")
 
