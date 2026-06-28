@@ -42,7 +42,6 @@ time.
 """
 import json
 import logging
-import uuid
 
 from utils.common.agent_types import AgentType
 from typing import Dict, Optional, Set
@@ -126,7 +125,6 @@ class ElectionMixin:
         self._received_alive: bool = False
         self._election_start_time: Optional[float] = None
         self._election_id_counter: int = 0
-        self._current_round_id: Optional[str] = None
 
         # Buffer for sensor data collected during an election
         self._election_buffer: Dict[str, int] = {}
@@ -220,9 +218,7 @@ class ElectionMixin:
 
         # ── Sensor data during election → buffer it ────────────────────
         sender_type = raw.get("sender_type")
-        if sender_type == AgentType.SENSOR.value and (
-            self._election_in_progress or self._current_leader_id is None
-        ):
+        if sender_type == AgentType.SENSOR.value and self._election_in_progress:
             incoming: Dict[str, int] = raw.get("packets", {})
             if incoming:
                 for sensor, count in incoming.items():
@@ -313,12 +309,19 @@ class ElectionMixin:
         if self._election_in_progress:
             return  # already electing
 
-        round_id = f"{self.provider.get_id()}-{uuid.uuid4().hex[:8]}"
-        start_time = self.provider.current_time()
-        self._enter_election_round(
+        self._election_in_progress = True
+        self._received_alive = False
+        self._election_start_time = self.provider.current_time()
+        self._is_leader = False
+        self._current_leader_id = None
+
+        # Create metrics event
+        self._election_id_counter += 1
+        self._current_election_event = ElectionEvent(
+            election_id=self._election_id_counter,
             trigger=trigger,
-            round_id=round_id,
-            start_time=start_time,
+            start_time=self._election_start_time,
+            participants=[self.provider.get_id()],
         )
 
         logging.info(
@@ -329,9 +332,6 @@ class ElectionMixin:
         # Ask the invitation strategy to build the election message
         ctx = self._build_election_context()
         msg = self.invitation_strategy.build_election_message(ctx)
-        msg["trigger"] = trigger
-        msg["round_id"] = round_id
-        msg["election_start_time"] = start_time
         self._broadcast_dict(msg)
 
         # Set timeout: if no "alive" received, we win
@@ -341,17 +341,6 @@ class ElectionMixin:
         """Handle an incoming election message from a peer."""
         sender_id = raw["sender_id"]
         my_id = self.provider.get_id()
-        trigger = raw.get("trigger", "merge")
-        round_id = raw.get("round_id") or (
-            f"legacy-{sender_id}-{int(self.provider.current_time() * 1000)}"
-        )
-        start_time = float(raw.get("election_start_time", self.provider.current_time()))
-
-        self._enter_election_round(
-            trigger=trigger,
-            round_id=round_id,
-            start_time=start_time,
-        )
 
         logging.debug(
             f"UAV {my_id} received election from {sender_id}"
@@ -364,21 +353,21 @@ class ElectionMixin:
         )
 
         if preferred == my_id:
-            # We are preferred over the sender → send alive and
-            # re-broadcast election with the same round metadata.
+            # We are preferred over the sender → send alive and start our
+            # own election
             alive_msg = {
                 "msg_type": "alive",
                 "sender_type": "uav",
                 "sender_id": my_id,
             }
             self._broadcast_dict(alive_msg)
-            ctx = self._build_election_context()
-            msg = self.invitation_strategy.build_election_message(ctx)
-            msg["trigger"] = trigger
-            msg["round_id"] = round_id
-            msg["election_start_time"] = start_time
-            self._broadcast_dict(msg)
-            self._schedule_election_timeout()
+            # Start our own election if not already running
+            if not self._election_in_progress:
+                self._start_election(
+                    self._current_election_event.trigger
+                    if self._current_election_event
+                    else "merge"
+                )
         # If sender is preferred, just wait — they'll become leader or
         # someone even more preferred will.
 
@@ -412,13 +401,6 @@ class ElectionMixin:
 
         # No alive received → we are the leader
         my_id = self.provider.get_id()
-        trigger = (
-            self._current_election_event.trigger
-            if self._current_election_event is not None
-            else "merge"
-        )
-        round_id = self._current_round_id
-        election_start_time = self._election_start_time
         self._declare_leader(my_id)
 
         # Broadcast leader announcement
@@ -426,62 +408,17 @@ class ElectionMixin:
             "msg_type": "leader",
             "sender_type": "uav",
             "sender_id": my_id,
-            "election_start_time": election_start_time,
-            "trigger": trigger,
-            "round_id": round_id,
+            "election_start_time": self._election_start_time,
         }
         self._broadcast_dict(leader_msg)
 
     def _on_receive_leader(self, raw: dict) -> None:
         """Accept the declared leader and transfer buffered data."""
         leader_id = raw["sender_id"]
-        trigger = raw.get("trigger", "merge")
-        round_id = raw.get("round_id") or (
-            f"legacy-leader-{leader_id}-{int(self.provider.current_time() * 1000)}"
-        )
-        start_time = float(raw.get("election_start_time", self.provider.current_time()))
-        self._enter_election_round(
-            trigger=trigger,
-            round_id=round_id,
-            start_time=start_time,
-        )
         logging.info(
             f"UAV {self.provider.get_id()} accepts leader → {leader_id}"
         )
         self._declare_leader(leader_id)
-
-    def _enter_election_round(
-        self, trigger: str, round_id: str, start_time: float,
-    ) -> None:
-        """Ensure this UAV participates in the specified election round."""
-        my_id = self.provider.get_id()
-
-        if not self._election_in_progress:
-            self._election_in_progress = True
-            self._received_alive = False
-            self._election_start_time = start_time
-            self._is_leader = False
-            self._current_leader_id = None
-
-        self._current_round_id = round_id
-
-        if self._current_election_event is None:
-            self._election_id_counter += 1
-            self._current_election_event = ElectionEvent(
-                election_id=self._election_id_counter,
-                round_id=round_id,
-                trigger=trigger,
-                start_time=start_time,
-                participants=[my_id],
-            )
-            return
-
-        evt = self._current_election_event
-        evt.round_id = evt.round_id or round_id
-        evt.trigger = evt.trigger or trigger
-        evt.start_time = min(evt.start_time, start_time)
-        if my_id not in evt.participants:
-            evt.participants.append(my_id)
 
     def _declare_leader(self, leader_id: int) -> None:
         """Finalise the election: record metrics and transfer data."""
@@ -508,7 +445,6 @@ class ElectionMixin:
 
             ELECTION_LOG.append(evt)
             self._current_election_event = None
-            self._current_round_id = None
 
             logging.info(
                 f"UAV {my_id} election resolved: leader={leader_id}, "
