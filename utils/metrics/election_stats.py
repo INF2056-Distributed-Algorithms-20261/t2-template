@@ -18,6 +18,7 @@ class ElectionEvent:
     winner_id: int = -1
     participants: List[int] = field(default_factory=list)
     buffer_sizes: Dict[int, int] = field(default_factory=dict)
+    round_id: str = ""
     # uav_id → total packets buffered during election
 
 
